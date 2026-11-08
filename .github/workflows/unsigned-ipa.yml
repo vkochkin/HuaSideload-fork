@@ -1,0 +1,85 @@
+name: Build unsigned HuaSideload IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      HUASIDELOAD_TEAM_ID: ''
+      HUASIDELOAD_BUNDLE_ID: com.example.huasideload
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Check source and toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f project.yml
+          test -f HuaSideload/WatchLink.swift
+          mkdir -p output
+          git rev-parse HEAD | tee output/source-commit.txt
+          xcodebuild -version | tee output/xcode-version.txt
+          major=$(xcodebuild -version | head -n 1 | awk '{print $2}' | cut -d. -f1)
+          test "$major" -ge 16
+          if ! command -v xcodegen >/dev/null; then
+            brew install xcodegen
+          fi
+          xcodegen --version | tee output/xcodegen-version.txt
+      - name: Generate project
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash generate.sh
+          xcodebuild -list -project HuaSideload.xcodeproj
+      - name: Build for a physical iPhone without signing
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project HuaSideload.xcodeproj \
+            -scheme HuaSideload \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/HuaSideloadBuild" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' \
+            DEVELOPMENT_TEAM='' \
+            build 2>&1 | tee output/build.log
+      - name: Package and check unsigned IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          app="$RUNNER_TEMP/HuaSideloadBuild/Build/Products/Release-iphoneos/HuaSideload.app"
+          test -d "$app"
+          test -f "$app/Info.plist"
+          executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")
+          test -f "$app/$executable"
+          file "$app/$executable" | tee output/executable.txt
+          lipo -verify_arch arm64 "$app/$executable"
+          test ! -e "$app/embedded.mobileprovision"
+          if codesign --verify "$app" 2>/dev/null; then
+            echo 'Expected an unsigned build, but a signature was found' >&2
+            exit 1
+          fi
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$app" "$RUNNER_TEMP/ipa/Payload/HuaSideload.app"
+          (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/output/HuaSideload-unsigned.ipa" Payload)
+          unzip -t output/HuaSideload-unsigned.ipa
+          (cd output && shasum -a 256 HuaSideload-unsigned.ipa > SHA256SUMS.txt)
+      - name: Upload IPA and build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: HuaSideload-unsigned-${{ github.run_number }}
+          path: output/
+          if-no-files-found: error
+          retention-days: 7
