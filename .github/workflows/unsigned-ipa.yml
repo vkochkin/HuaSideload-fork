@@ -64,7 +64,7 @@ jobs:
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")
           test -f "$app/$executable"
           file "$app/$executable" | tee output/executable.txt
-          lipo -verify_arch arm64 "$app/$executable"
+          lipo "$app/$executable" -verify_arch arm64
           test ! -e "$app/embedded.mobileprovision"
           if codesign --verify "$app" 2>/dev/null; then
             echo 'Expected an unsigned build, but a signature was found' >&2
